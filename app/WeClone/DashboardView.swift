@@ -54,6 +54,7 @@ struct DashboardView: View {
     @State private var sizeScansInProgress: Set<String> = []
     @State private var showOnboarding: Bool = false
     @State private var showResetConfirmation: Bool = false
+    @State private var showRecloneConfirmation: Bool = false
     @AppStorage("weclone.onboarding_dismissed") private var onboardingDismissed = false
 
     var body: some View {
@@ -656,7 +657,7 @@ struct DashboardView: View {
     private var maintenancePage: some View {
         VStack(alignment: .leading, spacing: 20) {
             settingsGroup(title: "副本清理") {
-                settingsRow(label: "清理旧副本", subtitle: "只保留最近使用的若干个微信副本，运行中的不会被动", divider: false) {
+                settingsRow(label: "清理旧副本", subtitle: "只保留最近使用的若干个微信副本，运行中的不会被动", divider: true) {
                     HStack(spacing: 6) {
                         Text("保留最近")
                             .foregroundColor(.secondary)
@@ -672,6 +673,25 @@ struct DashboardView: View {
                         .buttonStyle(.bordered)
                         .disabled(isBusy)
                     }
+                }
+                settingsRow(label: "重建现有副本", subtitle: "旧版创建的副本是完整拷贝；重建为写时复制克隆，可省下大部分占用（只处理未运行的）", divider: false) {
+                    Button("重建") {
+                        showRecloneConfirmation = true
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isBusy)
+                }
+                .confirmationDialog(
+                    "重建现有副本",
+                    isPresented: $showRecloneConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("重建", role: .destructive) {
+                        runBusy { weChatManager.rebuildStoppedClones() }
+                    }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("未运行的副本会被删除并用写时复制方式重建，账号数据不受影响。")
                 }
             }
 

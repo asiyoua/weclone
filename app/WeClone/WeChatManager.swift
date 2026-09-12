@@ -250,14 +250,12 @@ class WeChatManager: ObservableObject {
             }
         }
 
-        do {
-            try FileManager.default.copyItem(atPath: sourcePath, toPath: clonedPath)
-        } catch {
+        guard copyBundleWithCloneSupport(from: sourcePath, to: clonedPath) else {
             appendLaunchLog(
                 bundleIdentifier: bundleId,
                 appPath: clonedPath,
                 status: "失败",
-                detail: "复制微信失败: \(error.localizedDescription)"
+                detail: "复制微信失败"
             )
             return nil
         }
@@ -274,6 +272,73 @@ class WeChatManager: ObservableObject {
 
         signApp(appPath: clonedPath)
         return clonedPath
+    }
+
+    /// 把未运行的旧副本重建为写时复制克隆，回收完整拷贝占用的空间。
+    /// 副本只是入口，重建不影响任何账号数据；运行中的副本不动。
+    func rebuildStoppedClones() -> String {
+        let running = Set(getRunningMainWeChatBundleIds())
+        let clones = listCloneApps()
+        guard let source = findWeChatApp() else {
+            return "未找到原版微信，无法重建。"
+        }
+        guard !clones.isEmpty else {
+            return "没有可重建的副本。"
+        }
+
+        var rebuilt = 0
+        var skippedRunning = 0
+        var failed = 0
+        for clone in clones {
+            if running.contains(clone.bundleId) {
+                skippedRunning += 1
+                continue
+            }
+            guard let index = cloneIndex(fromBundleId: clone.bundleId) else {
+                continue
+            }
+            do {
+                try FileManager.default.removeItem(atPath: clone.path)
+            } catch {
+                failed += 1
+                continue
+            }
+            if ensureClonedWeChat(sourcePath: source.path, cloneIndex: index) != nil {
+                rebuilt += 1
+            } else {
+                failed += 1
+            }
+        }
+
+        if rebuilt == 0 && skippedRunning == 0 && failed == 0 {
+            return "没有可重建的副本。"
+        }
+        var parts: [String] = ["已重建 \(rebuilt) 个副本"]
+        if skippedRunning > 0 { parts.append("跳过运行中 \(skippedRunning) 个") }
+        if failed > 0 { parts.append("失败 \(failed) 个") }
+        return parts.joined(separator: "，") + "。"
+    }
+
+    /// 用 APFS 写时复制克隆应用包：整树瞬时完成，实际新增磁盘占用远小于完整拷贝。
+    /// clonefile 失败（非 APFS 卷、跨卷等）时回退逐文件克隆，再回退普通拷贝。
+    private func copyBundleWithCloneSupport(from sourcePath: String, to destPath: String) -> Bool {
+        let source = sourcePath as NSString
+        let dest = destPath as NSString
+        if clonefile(source.fileSystemRepresentation, dest.fileSystemRepresentation, 0) == 0 {
+            return true
+        }
+        let flags = copyfile_flags_t(COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_CLONE)
+        let state = copyfile_state_alloc()
+        defer { copyfile_state_free(state) }
+        if copyfile(sourcePath, destPath, state, flags) == 0 {
+            return true
+        }
+        do {
+            try FileManager.default.copyItem(atPath: sourcePath, toPath: destPath)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// 更新克隆应用的 bundle 信息，避免实例互斥
