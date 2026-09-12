@@ -700,6 +700,7 @@ struct DashboardView: View {
                     Toggle("", isOn: $weChatManager.mismatchAlertEnabled)
                         .toggleStyle(.switch)
                         .labelsHidden()
+                        .controlSize(.small)
                 }
             }
 
@@ -805,6 +806,7 @@ struct DashboardView: View {
                     Toggle("", isOn: $autoUpdate.autoUpdateEnabled)
                         .toggleStyle(.switch)
                         .labelsHidden()
+                        .controlSize(.small)
                 }
             }
         }
