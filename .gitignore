@@ -1,0 +1,6 @@
+.DS_Store
+app/.build/
+app/WeClone.app/
+app/dist/
+*.png
+web/.vercel/
