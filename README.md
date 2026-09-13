@@ -14,7 +14,7 @@ macOS 微信多开工具：点一下「再开一个」，新的微信就坐到�
 
 ## 下载
 
-- 最新版直链：<https://github.com/asiyoua/weclone/releases/latest/download/WeClone.dmg>
+- 最新版：<https://github.com/asiyoua/weclone/releases/latest>（附件 `WeClone-<版本>.dmg`）
 - GitHub Releases：<https://github.com/asiyoua/weclone/releases/latest>
 
 安装：打开 DMG，把 WeClone 拖进「应用程序」。首次运行如提示安全确认，到「系统设置 → 隐私与安全性」点「仍要打开」。
