@@ -94,7 +94,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let menu = statusMenu else { return }
         menu.removeAllItems()
 
-        let summaries = weChatManager.getRunningInstanceSummaries()
+        // 只读轮询发布的缓存：主线程在这里做磁盘扫描曾把启动和开菜单卡死数分钟（TCC 重判定时无框可弹）
+        let summaries = weChatManager.runningSummaries
         let infoTitle = summaries.isEmpty
             ? "暂无微信运行"
             : "运行中: " + summaries.map { $0.displayName }.joined(separator: "、")

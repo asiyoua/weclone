@@ -310,7 +310,7 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var quickActionRows: some View {
-        settingsRow(label: "启动新实例", subtitle: "自动创建或复用微信副本，多开不串号", divider: true) {
+        settingsRow(label: "启动新微信", subtitle: "自动创建或复用微信副本，多开不串号", divider: true) {
             HStack(spacing: 8) {
                 if isBusy {
                     ProgressView()
@@ -696,8 +696,14 @@ struct DashboardView: View {
             }
 
             settingsGroup(title: "偏好设置") {
-                settingsRow(label: "串号提醒", subtitle: "微信窗口登录的账号和记住的对不上时，发系统通知提醒", divider: false) {
+                settingsRow(label: "串号提醒", subtitle: "微信窗口登录的账号和记住的对不上时，发系统通知提醒", divider: true) {
                     Toggle("", isOn: $weChatManager.mismatchAlertEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .controlSize(.small)
+                }
+                settingsRow(label: "弹窗提醒更新", subtitle: "每天自动检查新版本，发现后弹窗询问；关闭后仍可在「关于」页手动检查", divider: false) {
+                    Toggle("", isOn: $autoUpdate.autoUpdateEnabled)
                         .toggleStyle(.switch)
                         .labelsHidden()
                         .controlSize(.small)
@@ -734,82 +740,48 @@ struct DashboardView: View {
     // MARK: 关于
 
     private var aboutPage: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 14) {
-                BrandLogoView(size: 56)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("WeClone")
-                        .font(.system(size: 22, weight: .bold))
-                    Text("稳定多开 · 账号不串 · 数据不丢")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
-            }
-            .padding(.top, 4)
-
-            settingsGroup(title: "应用信息") {
-                settingsRow(label: "版本", divider: true) {
-                    Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "-"))")
-                        .foregroundColor(.secondary)
-                }
-                settingsRow(label: "系统要求", subtitle: "微信多开依赖本机已安装微信", divider: true) {
-                    Text("macOS 13.0+")
-                        .foregroundColor(.secondary)
-                }
-                settingsRow(label: "数据位置", subtitle: "微信副本与数据目录均在本用户目录下，卸载即清理", divider: false) {
-                    Text("~/Applications/WeCloneClones")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .textSelection(.enabled)
-                }
-            }
-
-            settingsGroup(title: "三步开始") {
-                settingsRow(label: "再开一个微信", subtitle: "在「总览」点击「再开一个」，自动创建第二个微信窗口", divider: true) {
-                    Text("1")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Color.accentColor))
-                }
-                settingsRow(label: "扫码登录", subtitle: "用另一个手机微信扫码登录第二个账号", divider: true) {
-                    Text("2")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Color.accentColor))
-                }
-                settingsRow(label: "记住账号", subtitle: "在「账号」页绑定后，下次启动自动对应，不会串号", divider: false) {
-                    Text("3")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Color.accentColor))
-                }
-            }
-
-            settingsGroup(title: "软件更新") {
-                settingsRow(label: "检查更新", subtitle: autoUpdate.statusText, divider: true) {
-                    HStack(spacing: 8) {
-                        if autoUpdate.isChecking {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        Button("立即检查") {
-                            autoUpdate.checkNow()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(autoUpdate.isChecking)
+        VStack(spacing: 14) {
+            BrandLogoView(size: 96)
+            Text("WeClone")
+                .font(.largeTitle.bold())
+            Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-")")
+                .foregroundColor(.secondary)
+            Text("一款稳定的微信多开工具。\n自动创建副本、记住账号，多开不串号、数据不丢。\n副本数据都在本机用户目录下。\n\nMIT 开源许可证")
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+            Button {
+                autoUpdate.checkManually()
+            } label: {
+                if autoUpdate.isChecking {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("检查中……")
                     }
-                }
-                settingsRow(label: "自动检查更新", subtitle: "每天自动检查一次，发现新版本先询问再安装", divider: false) {
-                    Toggle("", isOn: $autoUpdate.autoUpdateEnabled)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                        .controlSize(.small)
+                } else {
+                    Text("检查更新")
                 }
             }
+            .buttonStyle(.bordered)
+            .disabled(autoUpdate.isBusy)
+            if autoUpdate.hasStatus {
+                Text(autoUpdate.statusText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Divider()
+            aboutLinkRow(
+                label: "项目仓库",
+                title: "github.com/asiyoua/weclone",
+                urlString: "https://github.com/asiyoua/weclone")
+            aboutLinkRow(
+                label: "联系作者",
+                title: "xinzhu400@gmail.com",
+                urlString: "mailto:xinzhu400@gmail.com")
         }
+        .padding(.top, 28)
+        .frame(maxWidth: 420)
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Feedback
@@ -859,7 +831,7 @@ struct DashboardView: View {
     private func launchOneMore() {
         runBusy {
             weChatManager.launchNewWeChat()
-                ? "已发起启动新的微信实例。"
+                ? "已发起启动新的微信。"
                 : "启动失败：未找到微信应用或副本创建失败。"
         }
     }
@@ -987,6 +959,20 @@ struct DashboardView: View {
     }
 
     // MARK: - Components（Pico 同款分组样式）
+
+    /// 「关于」页链接行：左侧灰色小标签，右侧蓝色链接
+    private func aboutLinkRow(label: String, title: String, urlString: String) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+            if let url = URL(string: urlString) {
+                Link(title, destination: url)
+                    .font(.caption)
+            }
+        }
+    }
 
     /// 设置行：左侧标题（可选副标题），右侧控件，行底细分隔线
     private func settingsRow<Control: View>(
