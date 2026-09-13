@@ -702,8 +702,14 @@ struct DashboardView: View {
                         .labelsHidden()
                         .controlSize(.small)
                 }
-                settingsRow(label: "弹窗提醒更新", subtitle: "每天自动检查新版本，发现后弹窗询问；关闭后仍可在「关于」页手动检查", divider: false) {
+                settingsRow(label: "弹窗提醒更新", subtitle: "每天自动检查新版本，发现后弹窗询问；关闭后仍可在「关于」页手动检查", divider: true) {
                     Toggle("", isOn: $autoUpdate.autoUpdateEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .controlSize(.small)
+                }
+                settingsRow(label: "自动安装更新", subtitle: "发现新版本后不询问，直接下载并安装", divider: false) {
+                    Toggle("", isOn: $autoUpdate.autoInstallUpdates)
                         .toggleStyle(.switch)
                         .labelsHidden()
                         .controlSize(.small)

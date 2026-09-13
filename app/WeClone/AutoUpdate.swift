@@ -17,15 +17,24 @@ struct WeCloneReleaseInfo: Decodable {
 
     let tagName: String
     let assets: [Asset]
+    /// Release 说明正文（GitHub API 才有；限流回退路径拿不到）
+    let body: String?
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
         case assets
+        case body
     }
 
     var dmgAsset: Asset? {
         assets.first { $0.name.hasSuffix(".dmg") }
     }
+}
+
+/// 更新弹窗说明框里的一行：标题行加粗，普通行带圆点
+struct ReleaseNoteLine: Equatable {
+    let isHeader: Bool
+    let text: String
 }
 
 enum AutoUpdateError: LocalizedError {
@@ -88,11 +97,10 @@ final class UpdateRedirectGuard: NSObject, URLSessionDelegate, @unchecked Sendab
 
 // MARK: - Auto update controller
 
-/// 自动（每日）检查 GitHub Releases，发现新版本时弹窗询问（立即更新/暂不更新）；
-/// 「关于」页的「检查更新」是手动入口，不受开关和「暂不更新」影响。点「立即更新」
-/// 后同一个弹窗原地直接下载安装包并显示进度，失败就地显示原因并可重试；下载完
-/// 成后由独立 helper 等本进程退出后替换已安装的 WeClone 并重启。新旧包 bundle id
-/// 一致，账号绑定与所有设置在更新后原样保留。
+/// 自动（每日）检查 GitHub Releases，发现新版本弹更新窗：发布说明、跳过此版本、
+/// 稍后提醒、自动安装；「关于」页「检查更新」是手动入口，不受任何跳过记录影响。
+/// 点「安装更新」后同一窗口原地直接下载安装包并显示进度，失败就地显示原因并可
+/// 重试；下载完成后由独立 helper 等本进程退出后替换已安装的 WeClone 并重启。
 @MainActor
 final class AutoUpdateController: ObservableObject {
     enum Phase: Equatable {
@@ -106,7 +114,7 @@ final class AutoUpdateController: ObservableObject {
     }
 
     @Published var phase: Phase = .idle
-    /// 自动检查更新开关，持久化到 UserDefaults；切换即重新调度监控
+    /// 自动检查更新开关（弹窗提醒），持久化到 UserDefaults；切换即重新调度监控
     @Published var autoUpdateEnabled: Bool {
         didSet {
             UserDefaults.standard.set(autoUpdateEnabled, forKey: autoUpdateEnabledKey)
@@ -115,11 +123,26 @@ final class AutoUpdateController: ObservableObject {
             }
         }
     }
+    /// 「自动安装更新」勾选：发现新版本后不询问，直接下载并安装
+    @Published var autoInstallUpdates: Bool {
+        didSet {
+            UserDefaults.standard.set(autoInstallUpdates, forKey: autoInstallUpdatesKey)
+        }
+    }
+    /// 更新弹窗「跳过此版本」记下的 tag；自动检查跳过它，手动检查不受限
+    @Published var updateSkippedTag: String? {
+        didSet {
+            UserDefaults.standard.set(updateSkippedTag ?? "", forKey: updateSkippedTagKey)
+        }
+    }
 
     private let autoUpdateEnabledKey = "weclone.auto_update_enabled"
+    private let autoInstallUpdatesKey = "weclone.auto_install_updates"
+    private let updateSkippedTagKey = "weclone.update_skipped_tag"
 
     static let checkInterval: TimeInterval = 24 * 60 * 60
     static let downloadSizeCap = 64 * 1024 * 1024
+    static let promptWindowSize = NSSize(width: 460, height: 392)
 
     private var timer: Timer?
     private var scheduledCheck: Task<Void, Never>?
@@ -132,6 +155,10 @@ final class AutoUpdateController: ObservableObject {
             autoUpdateEnabled = true
         } else {
             autoUpdateEnabled = UserDefaults.standard.bool(forKey: autoUpdateEnabledKey)
+        }
+        autoInstallUpdates = UserDefaults.standard.object(forKey: autoInstallUpdatesKey) as? Bool ?? false
+        if let skipped = UserDefaults.standard.string(forKey: updateSkippedTagKey), !skipped.isEmpty {
+            updateSkippedTag = skipped
         }
     }
 
@@ -153,6 +180,47 @@ final class AutoUpdateController: ObservableObject {
         return true
     }
 
+    /// 本机当前版本号
+    var currentVersion: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 待更新版本的说明行（无正文时为空数组）
+    var releaseNoteLines: [ReleaseNoteLine] {
+        guard let body = pendingRelease?.body,
+            !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return [] }
+        return Self.parseReleaseNotes(body)
+    }
+
+    /// 把 Release 正文（轻量 markdown）拆成弹窗说明框的行
+    nonisolated static func parseReleaseNotes(_ body: String) -> [ReleaseNoteLine] {
+        body.split(separator: "\n", omittingEmptySubsequences: true).compactMap { rawLine in
+            var line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            var isHeader = false
+            while line.hasPrefix("#") {
+                isHeader = true
+                line = String(line.dropFirst())
+            }
+            line = line.trimmingCharacters(in: .whitespaces)
+            if !isHeader {
+                for marker in ["- ", "* ", "• "] where line.hasPrefix(marker) {
+                    line = String(line.dropFirst(marker.count))
+                    break
+                }
+                // 「- 」这类空列表项被行尾 trim 后只剩符号本身
+                if line == "-" || line == "*" || line == "•" { return nil }
+            }
+            line = line
+                .replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "`", with: "")
+            guard !line.isEmpty else { return nil }
+            return ReleaseNoteLine(isHeader: isHeader, text: line)
+        }
+    }
+
     func startMonitoring() {
         timer?.invalidate()
         timer = nil
@@ -166,7 +234,7 @@ final class AutoUpdateController: ObservableObject {
         }
     }
 
-    /// 「关于」页「检查更新」：手动触发，不受自动更新开关和「暂不更新」影响
+    /// 「关于」页「检查更新」：手动触发，不受自动更新开关和跳过记录影响
     func checkManually() {
         guard !isBusy else { return }
         scheduleCheck(after: 0, manual: true)
@@ -191,8 +259,7 @@ final class AutoUpdateController: ObservableObject {
         phase = .checking
         do {
             let release = try await fetchLatestRelease()
-            let local = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let local = currentVersion
             guard UpdateChecker.compare(local: local, remoteTag: release.tagName) == .remoteNewer else {
                 phase = .upToDate
                 return
@@ -200,15 +267,18 @@ final class AutoUpdateController: ObservableObject {
             guard release.dmgAsset != nil else {
                 throw AutoUpdateError.noInstallerAsset
             }
-            // 自动检查时，本会话内用户已对同一版本点过「暂不」就不再打扰；
-            // 手动检查是用户点名要看，无视这条
-            if !manual, release.tagName == skippedVersion {
+            // 自动检查时，本会话点过「稍后提醒」、或用户曾点「跳过此版本」
+            // 的 tag 都不再打扰；手动检查是用户点名要看，两条都无视
+            if !manual, release.tagName == skippedVersion || release.tagName == updateSkippedTag {
                 phase = .upToDate
                 return
             }
             pendingRelease = release
             phase = .available(version: release.tagName)
             presentUpdatePrompt(version: release.tagName)
+            if autoInstallUpdates {
+                startInstall()
+            }
         } catch is CancellationError {
             // a newer check superseded this one
         } catch {
@@ -238,33 +308,72 @@ final class AutoUpdateController: ObservableObject {
     // MARK: Update prompt
 
     private var promptWindow: NSWindow?
+    private var promptWindowDelegate: UpdatePromptWindowDelegate?
 
     /// 非阻塞提示窗：普通 NSWindow + SwiftUI（不跑 modal 或 sheet），视图直接
-    /// 观察 controller。点「立即更新」后同一窗口原地变成下载进度，失败就地显示
-    /// 原因并可重试，不再出现「点了没反应」。
+    /// 观察 controller，点「安装更新」后同一窗口原地变成下载进度，失败就地显示
+    /// 原因。窗口绝不 makeKey、按钮不挂快捷键：用户正在打字时误按回车不能
+    /// 隔空触发安装（Pico v1.0.4 血泪教训）。
     private func presentUpdatePrompt(version: String) {
         if let window = promptWindow {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            positionPromptWindow(window)
+            window.orderFrontRegardless()
             return
         }
+        let size = Self.promptWindowSize
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 170),
+            contentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "WeClone 更新"
-        let hosting = NSHostingController(
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.contentViewController = NSHostingController(
             rootView: UpdatePromptView(controller: self))
-        hosting.sizingOptions = .preferredContentSize
-        window.contentViewController = hosting
-        window.center()
+        let delegate = UpdatePromptWindowDelegate { [weak self] in
+            self?.remindLater()
+        }
+        promptWindowDelegate = delegate
+        window.delegate = delegate
         promptWindow = window
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        positionPromptWindow(window)
+        window.orderFrontRegardless()
+    }
+
+    /// macOS 26 的 window.center() 会把窗放到屏幕外且缩水，必须显式
+    /// setFrameOrigin
+    private func positionPromptWindow(_ window: NSWindow) {
+        guard let screen = NSScreen.main else { return }
+        let frame = window.frame
+        let x = screen.visibleFrame.midX - frame.width / 2
+        let y = screen.visibleFrame.midY - frame.height / 2
+        window.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     private func closePromptWindow() {
         promptWindow?.orderOut(nil)
         promptWindow = nil
+    }
+
+    /// 「跳过此版本」：记进偏好，之后自动检查不再弹这个版本
+    func skipThisVersion() {
+        if let release = pendingRelease {
+            updateSkippedTag = release.tagName
+        }
+        dismissPrompt()
+    }
+
+    /// 「稍后提醒我」/ 点关闭按钮：只在本会话内不再打扰同一版本
+    func remindLater() {
+        if let release = pendingRelease {
+            skippedVersion = release.tagName
+        }
+        dismissPrompt()
+    }
+
+    private func dismissPrompt() {
+        pendingRelease = nil
+        closePromptWindow()
+        phase = .upToDate
     }
 
     func confirmUpdate() {
@@ -292,15 +401,6 @@ final class AutoUpdateController: ObservableObject {
         installTask = Task { [weak self] in
             await self?.downloadAndInstall(release: release, assetURL: url, expectedSize: dmg.size)
         }
-    }
-
-    func postponeUpdate() {
-        if let release = pendingRelease {
-            skippedVersion = release.tagName
-        }
-        pendingRelease = nil
-        closePromptWindow()
-        phase = .upToDate
     }
 
     private func downloadAndInstall(release: WeCloneReleaseInfo, assetURL: URL, expectedSize: Int) async {
@@ -363,7 +463,7 @@ final class AutoUpdateController: ObservableObject {
         let asset = WeCloneReleaseInfo.Asset(
             name: "WeClone-\(version).dmg", size: 0,
             browserDownloadURL: "https://github.com/asiyoua/weclone/releases/download/\(tag)/WeClone-\(version).dmg")
-        return WeCloneReleaseInfo(tagName: tag, assets: [asset])
+        return WeCloneReleaseInfo(tagName: tag, assets: [asset], body: nil)
     }
 
     private func download(
@@ -441,69 +541,205 @@ final class AutoUpdateController: ObservableObject {
     }
 }
 
+/// 点红色关闭钮等同「稍后提醒我」
+final class UpdatePromptWindowDelegate: NSObject, NSWindowDelegate {
+    private let onClose: () -> Void
+
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        DispatchQueue.main.async { [onClose] in onClose() }
+    }
+}
+
+/// 更新弹窗：图标 + 「WeClone x.y.z 可更新」+ 当前版本 + 可滚动的发布说明框
+/// + 「自动安装」勾选 + 跳过/稍后/安装三键。窗口尺寸固定，见
+/// AutoUpdateController.promptWindowSize。
 private struct UpdatePromptView: View {
     @ObservedObject var controller: AutoUpdateController
+    @State private var autoInstall: Bool
+
+    init(controller: AutoUpdateController) {
+        self.controller = controller
+        _autoInstall = State(initialValue: controller.autoInstallUpdates)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 0) {
             switch controller.phase {
-            case .available(let version):
-                Text("发现新版本 \(version)，要现在更新吗？")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("将直接下载安装包并替换本机的 WeClone，账号绑定和设置都会保留。")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Spacer()
-                    Button("暂不更新") { controller.postponeUpdate() }
-                        .keyboardShortcut(.cancelAction)
-                    Button("立即更新") { controller.confirmUpdate() }
-                        .keyboardShortcut(.defaultAction)
-                }
+            case .available:
+                availableContent
             case .downloading(let progress):
-                Text(controller.statusText)
-                    .font(.system(size: 12))
+                downloadingContent(progress: progress)
+            case .installing:
+                installingContent
+            case .failed(let message):
+                failedContent(message: message)
+            case .checking:
+                checkingContent
+            case .idle, .upToDate:
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(20)
+        .frame(
+            width: AutoUpdateController.promptWindowSize.width,
+            height: AutoUpdateController.promptWindowSize.height,
+            alignment: .topLeading
+        )
+    }
+
+    // MARK: 有新版本
+
+    private var availableContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 64, height: 64)
+                VStack(alignment: .leading, spacing: 3) {
+                    if case .available(let version) = controller.phase {
+                        Text("WeClone \(UpdateChecker.stripLeadingV(version)) 可更新")
+                            .font(.system(size: 17, weight: .semibold))
+                        Text("你当前使用的是 \(controller.currentVersion)")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            notesBox
+            Toggle(isOn: Binding(
+                get: { autoInstall },
+                set: { autoInstall = $0; controller.autoInstallUpdates = $0 }
+            )) {
+                Text("自动下载并安装以后的更新")
+                    .font(.callout)
+            }
+            .toggleStyle(.checkbox)
+            HStack(spacing: 10) {
+                Button("跳过此版本") { controller.skipThisVersion() }
+                    .buttonStyle(.link)
+                    .font(.callout)
+                Spacer()
+                Button("稍后提醒我") { controller.remindLater() }
+                    .buttonStyle(.bordered)
+                Button("安装更新") { controller.confirmUpdate() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    private var notesBox: some View {
+        ScrollView {
+            let lines = controller.releaseNoteLines
+            VStack(alignment: .leading, spacing: 8) {
+                if lines.isEmpty {
+                    Text("这个版本没有写更新说明。")
+                        .font(.callout)
+                        .foregroundColor(.secondary.opacity(0.7))
+                } else {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        if line.isHeader {
+                            Text(line.text)
+                                .font(.system(size: 13, weight: .semibold))
+                        } else {
+                            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                Text("•")
+                                    .foregroundColor(.secondary)
+                                Text(line.text)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .font(.callout)
+                        }
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(height: 190)
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+        )
+    }
+
+    // MARK: 下载 / 安装 / 失败 / 检查中
+
+    private func downloadingContent(progress: Double) -> some View {
+        centeredMessage {
+            VStack(spacing: 12) {
+                Text(progress > 0 ? "下载中 \(Int(progress * 100))%" : "下载中……")
+                    .font(.callout)
                     .foregroundColor(.secondary)
                 if progress > 0 {
                     ProgressView(value: progress)
+                        .frame(maxWidth: 300)
                 } else {
                     ProgressView()
                         .controlSize(.small)
                 }
-            case .installing:
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("正在安装……")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
-            case .failed(let message):
-                Text("更新失败：\(message)")
-                    .font(.system(size: 12))
-                    .foregroundColor(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Spacer()
-                    Button("暂不更新") { controller.postponeUpdate() }
-                        .keyboardShortcut(.cancelAction)
-                    Button("重试") { controller.retryInstall() }
-                        .keyboardShortcut(.defaultAction)
-                }
-            case .checking:
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("检查中……")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
-            case .idle, .upToDate:
-                EmptyView()
+                Text("下载完成后 WeClone 会自动重启完成安装。")
+                    .font(.caption)
+                    .foregroundColor(.secondary.opacity(0.7))
             }
         }
-        .padding(20)
-        .frame(width: 360)
+    }
+
+    private var installingContent: some View {
+        centeredMessage {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在安装……")
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func failedContent(message: String) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("更新失败：\(message)")
+                .font(.callout)
+                .foregroundColor(.red)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button("跳过此版本") { controller.skipThisVersion() }
+                    .buttonStyle(.link)
+                    .font(.callout)
+                Spacer()
+                Button("稍后提醒我") { controller.remindLater() }
+                    .buttonStyle(.bordered)
+                Button("重试") { controller.retryInstall() }
+                    .buttonStyle(.borderedProminent)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var checkingContent: some View {
+        centeredMessage {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("检查中……")
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func centeredMessage<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 0) {
+            Spacer()
+            content()
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 }

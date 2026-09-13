@@ -61,7 +61,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.contentView = hosting
         window.contentMinSize = NSSize(width: 720, height: 520)
         window.setContentSize(NSSize(width: 820, height: 600))
-        window.center()
+        // macOS 26 的 window.center() 会把窗放到屏幕外且缩水，必须显式 setFrameOrigin
+        if let screen = NSScreen.main {
+            let visible = screen.visibleFrame
+            let x = visible.midX - 820 / 2
+            let y = visible.midY - 600 / 2
+            window.setFrameOrigin(NSPoint(x: x, y: y))
+        }
         dashboardWindow = window
     }
 
