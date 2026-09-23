@@ -543,7 +543,7 @@ class WeChatManager: ObservableObject {
     private func addMismatchNotification(for summary: RunningInstanceSummary) {
         let content = UNMutableNotificationContent()
         content.title = "WeClone 串号提醒"
-        content.body = "「\(summary.displayName)」现在登录的是 \(shortenedWxid(summary.activeWxid))，记住的却是 \(shortenedWxid(summary.expectedWxid))，发消息前注意别串号。"
+        content.body = "「\(summary.displayName)」现在登录的是 \(shortWxid(summary.activeWxid))，记住的却是 \(shortWxid(summary.expectedWxid))，发消息前注意别串号。"
         content.sound = .default
         let request = UNNotificationRequest(
             identifier: "weclone.mismatch.\(summary.bundleIdentifier)",
@@ -552,7 +552,7 @@ class WeChatManager: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    private func shortenedWxid(_ wxid: String?) -> String {
+    func shortWxid(_ wxid: String?) -> String {
         guard let wxid, !wxid.isEmpty else { return "（无）" }
         guard wxid.count > 12 else { return wxid }
         return "\(wxid.prefix(6))…\(wxid.suffix(4))"

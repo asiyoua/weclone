@@ -98,8 +98,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 button.toolTip = "WeClone"
             } else {
                 button.toolTip = summaries.map {
-                    let mark = $0.bindingStatus.contains("账号和绑定不一致") ? "⚠︎" : ""
-                    return "\(mark)\($0.displayName)(\($0.activeWxid ?? "未识别"))"
+                    let mark = $0.bindingStatus.contains("账号和绑定不一致") ? "⚠︎ " : ""
+                    return "\(mark)\($0.displayName)：\($0.activeWxid.flatMap { weChatManager.shortWxid($0) } ?? "未识别账号")"
                 }.joined(separator: "、")
             }
         }
@@ -120,8 +120,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !summaries.isEmpty {
             for item in summaries {
-                let status = item.bindingStatus.contains("账号和绑定不一致") ? "⚠︎ 账号不匹配" : ""
-                let sub = NSMenuItem(title: "  \(item.displayName): \(item.activeWxid ?? "未识别") \(status)", action: nil, keyEquivalent: "")
+                let status = item.bindingStatus.contains("账号和绑定不一致") ? " ⚠︎ 账号对不上" : ""
+                let sub = NSMenuItem(title: "    \(item.displayName)：\(weChatManager.shortWxid(item.activeWxid))\(status)", action: nil, keyEquivalent: "")
                 sub.isEnabled = false
                 menu.addItem(sub)
             }
@@ -129,12 +129,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        menu.addItem(NSMenuItem(title: "再开一个", action: #selector(onLaunchNewWeChat), keyEquivalent: "n"))
+        // 按使用频率排：一键全开最高频，其次是启动类，记住/打开窗口次之，维护类垫底
+        menu.addItem(NSMenuItem(title: "按账号重启（一键全开）", action: #selector(onRelaunchByBindings), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "再开一个微信", action: #selector(onLaunchNewWeChat), keyEquivalent: "n"))
 
-        let launchToItem = NSMenuItem(title: "同时开", action: nil, keyEquivalent: "")
+        let launchToItem = NSMenuItem(title: "同时开多个", action: nil, keyEquivalent: "")
         let launchSubmenu = NSMenu()
         [2, 3, 4].forEach { count in
-            let item = NSMenuItem(title: "\(count) 个微信", action: #selector(onLaunchToCount(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: "一共开 \(count) 个微信", action: #selector(onLaunchToCount(_:)), keyEquivalent: "")
             item.tag = count
             item.target = self
             launchSubmenu.addItem(item)
@@ -142,16 +144,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         launchToItem.submenu = launchSubmenu
         menu.addItem(launchToItem)
 
-        menu.addItem(NSMenuItem(title: "记住当前账号", action: #selector(onBindTopTwoRunning), keyEquivalent: "b"))
-        menu.addItem(NSMenuItem(title: "按账号重启（一键全开）", action: #selector(onRelaunchByBindings), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "管理面板", action: #selector(onOpenDashboard), keyEquivalent: "d"))
-        menu.addItem(NSMenuItem(title: "全部关闭", action: #selector(onCloseAllWeChat), keyEquivalent: "k"))
+        menu.addItem(NSMenuItem(title: "关闭全部微信", action: #selector(onCloseAllWeChat), keyEquivalent: "k"))
+
         menu.addItem(NSMenuItem.separator())
+
+        menu.addItem(NSMenuItem(title: "记住所有运行中的账号", action: #selector(onBindTopTwoRunning), keyEquivalent: "b"))
+        menu.addItem(NSMenuItem(title: "打开主窗口", action: #selector(onOpenDashboard), keyEquivalent: "d"))
+
+        menu.addItem(NSMenuItem.separator())
+
+        menu.addItem(NSMenuItem(title: "撤销上一步", action: #selector(onUndoLastAction), keyEquivalent: "z"))
+        menu.addItem(NSMenuItem(title: "复制诊断信息", action: #selector(onCopyDiagnostics), keyEquivalent: "c"))
         menu.addItem(NSMenuItem(title: "重置设置", action: #selector(onResetMappings), keyEquivalent: "r"))
-        let undoItem = NSMenuItem(title: "撤销上一步", action: #selector(onUndoLastAction), keyEquivalent: "z")
-        undoItem.isEnabled = weChatManager.canUndoLastAction
-        menu.addItem(undoItem)
-        menu.addItem(NSMenuItem(title: "复制诊断", action: #selector(onCopyDiagnostics), keyEquivalent: "c"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出 WeClone", action: #selector(onQuitApp), keyEquivalent: "q"))
 
@@ -173,7 +177,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func onBindTopTwoRunning() {
-        _ = weChatManager.autoBindRunningInstances(limit: 2)
+        _ = weChatManager.autoBindRunningInstances(limit: 4)
         updateStatusButton()
     }
 
