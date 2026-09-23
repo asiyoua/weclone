@@ -1,18 +1,18 @@
 import SwiftUI
 import Cocoa
+import Combine
 
 struct DashboardView: View {
     @ObservedObject var weChatManager: WeChatManager
     @ObservedObject var autoUpdate: AutoUpdateController
 
     private enum Page: String, CaseIterable, Identifiable {
-        case overview, accounts, maintenance, about
+        case accounts, maintenance, about
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .overview: return "总览"
             case .accounts: return "账号"
             case .maintenance: return "维护"
             case .about: return "关于"
@@ -21,7 +21,6 @@ struct DashboardView: View {
 
         var systemImage: String {
             switch self {
-            case .overview: return "gauge"
             case .accounts: return "person.crop.circle"
             case .maintenance: return "wrench.and.screwdriver"
             case .about: return "info.circle"
@@ -31,7 +30,6 @@ struct DashboardView: View {
         // 仿 macOS 系统设置图标的渐变芯片配色
         var chipColors: [Color] {
             switch self {
-            case .overview: return [Color(red: 0.36, green: 0.66, blue: 0.96), Color(red: 0.12, green: 0.44, blue: 0.89)]
             case .accounts: return [Color(red: 0.67, green: 0.56, blue: 0.95), Color(red: 0.45, green: 0.31, blue: 0.81)]
             case .maintenance: return [Color(red: 0.64, green: 0.66, blue: 0.69), Color(red: 0.42, green: 0.45, blue: 0.49)]
             case .about: return [Color(red: 0.39, green: 0.78, blue: 0.47), Color(red: 0.18, green: 0.62, blue: 0.32)]
@@ -39,7 +37,7 @@ struct DashboardView: View {
         }
     }
 
-    @State private var selectedPage: Page = .overview
+    @State private var selectedPage: Page = .accounts
     @State private var targetCount: String = "2"
     @State private var keepCloneCount: String = "1"
     @State private var feedbackMessage: String = ""
@@ -49,6 +47,9 @@ struct DashboardView: View {
     @State private var isBusy: Bool = false
     @State private var isLoadingAccounts: Bool = false
     @State private var pendingSyncBundleIds: Set<String> = []
+    @State private var lastRunningBundleIds: Set<String> = []
+    @State private var deleteCandidate: WeChatManager.InstanceStoragePath?
+    @State private var showDeleteConfirmation: Bool = false
     /// 各实例聊天数据目录的磁盘占用（字节），会话内缓存
     @State private var storageSizes: [String: Int64] = [:]
     @State private var sizeScansInProgress: Set<String> = []
@@ -78,6 +79,13 @@ struct DashboardView: View {
                 refreshAccountRows()
             }
         }
+        // 运行中的微信集合一变（重启、新开、退出）就重扫数据目录，登录状态不再停在旧值
+        .onReceive(weChatManager.$runningSummaries) { summaries in
+            let ids = Set(summaries.map { $0.bundleIdentifier })
+            guard ids != lastRunningBundleIds else { return }
+            lastRunningBundleIds = ids
+            refreshAccountRows()
+        }
         .sheet(isPresented: $showOnboarding, onDismiss: {
             onboardingDismissed = true
         }) {
@@ -95,6 +103,22 @@ struct DashboardView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("将清空名称和账号记忆，不会删除微信数据。")
+        }
+        .confirmationDialog(
+            "删除「\(deleteCandidate?.appName ?? "")」",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("删除副本与数据目录", role: .destructive) {
+                guard let item = deleteCandidate else { return }
+                runBusy(
+                    { weChatManager.deleteInstance(bundleId: item.bundleIdentifier) },
+                    completion: { refreshAccountRows() }
+                )
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("把这个微信副本和它的聊天数据目录一起放进废纸篓（可撤销），并清掉记住的账号。微信主程序不受影响。")
         }
     }
 
@@ -168,8 +192,6 @@ struct DashboardView: View {
     @ViewBuilder
     private var pageContent: some View {
         switch selectedPage {
-        case .overview:
-            overviewPage
         case .accounts:
             accountsPage
         case .maintenance:
@@ -179,21 +201,103 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: 总览
+    // MARK: 账号（首页）
 
-    private var overviewPage: some View {
-        VStack(alignment: .leading, spacing: 20) {
+    private var accountsPage: some View {
+        VStack(alignment: .leading, spacing: 16) {
             if !conflictPaths.isEmpty {
                 conflictWarning
             }
             if !onboardingDismissed {
                 welcomeBanner
             }
-            settingsGroup(title: "运行状态") {
-                runningStatusRows
+
+            settingsGroup(title: "账号操作") {
+                settingsRow(label: "按账号重启（一键全开）", divider: true) {
+                    Button("执行") {
+                        runBusy(
+                            { weChatManager.relaunchByBindings() },
+                            completion: { refreshAccountRows() }
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy)
+                }
+                settingsRow(label: "记住所有运行中的账号", divider: false) {
+                    Button("执行") {
+                        runBusy(
+                            { weChatManager.autoBindRunningInstances(limit: 4) },
+                            completion: { refreshAccountRows() }
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isBusy)
+                }
             }
-            settingsGroup(title: "快捷操作") {
-                quickActionRows
+
+            settingsGroup(title: "启动微信") {
+                settingsRow(label: "启动新微信", divider: true) {
+                    HStack(spacing: 8) {
+                        Button(action: { launchOneMore() }) {
+                            Label("再开一个", systemImage: "plus.circle.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isBusy)
+
+                        Button(action: {
+                            runBusy { weChatManager.closeAllWeChat(); return "已请求关闭所有微信。" }
+                        }) {
+                            Label("全部关闭", systemImage: "xmark.circle")
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                        .disabled(isBusy)
+                    }
+                }
+                settingsRow(label: "同时开多个", divider: false) {
+                    HStack(spacing: 6) {
+                        TextField("2", text: $targetCount)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 40)
+                            .multilineTextAlignment(.center)
+                        Text("个微信")
+                            .foregroundColor(.secondary)
+                        Button("开始") {
+                            launchUpToTarget()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isBusy)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("微信窗口（\(accountRows.count)）")
+                    .font(.system(size: 13, weight: .semibold))
+                if isLoadingAccounts && accountRows.isEmpty {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Spacer()
+                Button {
+                    refreshAccountRows()
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isLoadingAccounts)
+            }
+            .padding(.top, 6)
+
+            if accountRows.isEmpty {
+                emptyAccountsCard
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(Array(accountRows.enumerated()), id: \.element.bundleIdentifier) { index, item in
+                        accountCard(item, index: index)
+                    }
+                }
             }
         }
     }
@@ -230,9 +334,9 @@ struct DashboardView: View {
                 .buttonStyle(.borderless)
             }
             VStack(alignment: .leading, spacing: 6) {
-                Label("点击「再开一个」启动第二个微信", systemImage: "1.circle.fill")
+                Label("点「再开一个」启动第二个微信", systemImage: "1.circle.fill")
                 Label("用另一个手机扫码登录", systemImage: "2.circle.fill")
-                Label("到「账号」页点击「记住当前账号」，下次自动对应", systemImage: "3.circle.fill")
+                Label("点「记住所有运行中的账号」，下次一键全开自动对应", systemImage: "3.circle.fill")
             }
             .font(.system(size: 12))
             .foregroundColor(.secondary)
@@ -246,110 +350,25 @@ struct DashboardView: View {
         )
     }
 
-    @ViewBuilder
-    private var runningStatusRows: some View {
-        let summaries = weChatManager.runningSummaries
-        if summaries.isEmpty {
-            settingsRow(label: "当前状态", subtitle: "暂无微信运行", divider: false) {
-                Circle()
-                    .fill(Color.gray.opacity(0.4))
-                    .frame(width: 8, height: 8)
-            }
-        } else {
-            settingsRow(label: "正在运行 \(summaries.count) 个微信", divider: true) {
-                EmptyView()
-            }
-            HStack(spacing: 10) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(summaries) { item in
-                            instanceCard(item)
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
-        }
-    }
-
-    private func instanceCard(_ item: WeChatManager.RunningInstanceSummary) -> some View {
-        let state = bindingState(active: item.activeWxid, expected: item.expectedWxid)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(state.color)
-                    .frame(width: 6, height: 6)
-                Text(item.displayName)
-                    .font(.system(size: 13, weight: .medium))
-            }
-            if let active = item.activeWxid, !active.isEmpty {
-                Text(shortWxid(active))
+    private var emptyAccountsCard: some View {
+        VStack(spacing: 6) {
+            Text(isLoadingAccounts ? "正在扫描数据目录……" : "还没有可显示的微信窗口")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+            if !isLoadingAccounts {
+                Text("点上方「再开一个」，创建第一个微信副本。")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
-                    .lineLimit(1)
-            } else {
-                Text(instanceTypeLabel(item.bundleIdentifier))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-            Text(state.pillText)
-                .font(.system(size: 10))
-                .foregroundColor(state.color)
-        }
-        .padding(10)
-        .frame(minWidth: 130, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-    }
-
-    @ViewBuilder
-    private var quickActionRows: some View {
-        settingsRow(label: "启动新微信", subtitle: "自动创建或复用微信副本，多开不串号", divider: true) {
-            HStack(spacing: 8) {
-                if isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Button(action: { launchOneMore() }) {
-                    Label("再开一个", systemImage: "plus.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isBusy)
-
-                Button(action: {
-                    runBusy { weChatManager.closeAllWeChat(); return "已请求关闭所有微信。" }
-                }) {
-                    Label("全部关闭", systemImage: "xmark.circle")
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .disabled(isBusy)
             }
         }
-        settingsRow(label: "同时开多个", subtitle: "自动补充到指定数量", divider: false) {
-            HStack(spacing: 6) {
-                TextField("2", text: $targetCount)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 40)
-                    .multilineTextAlignment(.center)
-                Text("个微信")
-                    .foregroundColor(.secondary)
-                Button("开始") {
-                    launchUpToTarget()
-                }
-                .buttonStyle(.bordered)
-                .disabled(isBusy)
-            }
+        .frame(maxWidth: .infinity)
+        .padding(28)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         }
     }
-
-    // MARK: 账号
 
     /// 窗口与账号对应关系的五种状态，卡片据此显示颜色、说明句和主按钮
     private enum AccountCardState {
@@ -378,89 +397,31 @@ struct DashboardView: View {
         }
     }
 
-    private var accountsPage: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("这里的每一行对应一个微信窗口（主程序或副本）。给窗口起好名字、记住它登录的账号，之后多开就会自动对上，不会串号。")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-
-            settingsGroup(title: "批量操作") {
-                settingsRow(label: "记住所有运行中的账号", subtitle: "不想逐个窗口点时，一键记住每个窗口当前登录的账号", divider: true) {
-                    Button("执行") {
-                        runBusy(
-                            { weChatManager.autoBindRunningInstances(limit: 4) },
-                            completion: { refreshAccountRows() }
-                        )
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(isBusy)
-                }
-                settingsRow(label: "按账号重启", subtitle: "关闭全部微信，再按记住的对应关系逐个开回来", divider: false) {
-                    Button("执行") {
-                        runBusy { weChatManager.relaunchByBindings() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isBusy)
-                }
-            }
-
-            HStack(spacing: 8) {
-                Text("微信窗口（\(accountRows.count)）")
-                    .font(.system(size: 13, weight: .semibold))
-                if isLoadingAccounts {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Spacer()
-                Button {
-                    refreshAccountRows()
-                } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(isLoadingAccounts)
-            }
-            .padding(.top, 6)
-
-            if accountRows.isEmpty {
-                emptyAccountsCard
-            } else {
-                VStack(spacing: 10) {
-                    ForEach(Array(accountRows.enumerated()), id: \.element.bundleIdentifier) { index, item in
-                        accountCard(item, index: index)
-                    }
-                }
-            }
+    /// 窗口没运行时不显示登录态词汇，只说绑定本身
+    private func displayPill(_ state: AccountCardState, isRunning: Bool) -> (text: String, color: Color) {
+        if isRunning {
+            return (state.pillText, state.color)
         }
-    }
-
-    private var emptyAccountsCard: some View {
-        VStack(spacing: 6) {
-            Text(isLoadingAccounts ? "正在扫描数据目录……" : "还没有可显示的微信窗口")
-                .font(.system(size: 13))
-                .foregroundColor(.secondary)
-            if !isLoadingAccounts {
-                Text("去「总览」点「再开一个」，创建第一个微信副本。")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(28)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        switch state {
+        case .consistent, .expectedOnly:
+            return ("已记住", .green)
+        case .mismatch:
+            return ("账号对不上", .red)
+        case .unboundLoggedIn, .unknown:
+            return ("未记住", .orange)
         }
     }
 
     private func accountCard(_ item: WeChatManager.InstanceStoragePath, index: Int) -> some View {
         let state = bindingState(active: item.activeWxid, expected: item.expectedWxid)
+        let isRunning = isInstanceRunning(item.bundleIdentifier)
+        let pill = item.unreadable
+            ? (text: "无权限读取", color: Color.orange)
+            : displayPill(state, isRunning: isRunning)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(state.color)
+                    .fill(pill.color)
                     .frame(width: 8, height: 8)
                 TextField("窗口名称", text: aliasBinding(item))
                     .textFieldStyle(.plain)
@@ -475,6 +436,7 @@ struct DashboardView: View {
                 Text("· \(instanceTypeLabel(item.bundleIdentifier))")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
+                runningPill(isRunning: isRunning)
                 if pendingSyncBundleIds.contains(item.bundleIdentifier) {
                     Text("待同步")
                         .font(.system(size: 10, weight: .medium))
@@ -485,16 +447,39 @@ struct DashboardView: View {
                         .help("微信更新过，下次启动这个副本时会自动重建，需要完整复制、耗时较长")
                 }
                 Spacer()
-                statusPill(state)
+                statusPill(text: pill.text, color: pill.color)
+                if item.bundleIdentifier != "com.tencent.xinWeChat" {
+                    Button {
+                        deleteCandidate = item
+                        showDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isBusy)
+                    .help("删除此窗口：副本与数据目录一起进废纸篓，可在维护页撤销")
+                }
                 cardMenu(item, index: index)
             }
 
             HStack(spacing: 10) {
-                Text(accountSentence(item, state: state))
+                Text(accountSentence(item, state: state, isRunning: isRunning))
                     .font(.system(size: 11))
                     .foregroundColor(state == .mismatch ? .red : .secondary)
                 Spacer(minLength: 0)
-                if state == .mismatch, let active = item.activeWxid {
+                if item.unreadable {
+                    Button("去授权") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("打开系统设置的「完全磁盘访问权限」，把 WeClone 打开后回来点「刷新」")
+                }
+                if isRunning, state == .mismatch, let active = item.activeWxid {
                     Button("更新绑定") {
                         bindCard(item, index: index, wxid: active)
                     }
@@ -502,7 +487,7 @@ struct DashboardView: View {
                     .controlSize(.small)
                     .disabled(isBusy)
                 }
-                if state == .unboundLoggedIn, let active = item.activeWxid {
+                if isRunning, state == .unboundLoggedIn, let active = item.activeWxid {
                     Button("记住当前账号") {
                         bindCard(item, index: index, wxid: active)
                     }
@@ -533,17 +518,40 @@ struct DashboardView: View {
         }
     }
 
-    private func statusPill(_ state: AccountCardState) -> some View {
-        Text(state.pillText)
+    private func runningPill(isRunning: Bool) -> some View {
+        let color: Color = isRunning ? .green : .secondary
+        return Text(isRunning ? "运行中" : "未运行")
             .font(.system(size: 10, weight: .medium))
-            .foregroundColor(state.color)
+            .foregroundColor(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.1), in: Capsule())
+    }
+
+    private func statusPill(text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(color)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(state.color.opacity(0.12), in: Capsule())
+            .background(color.opacity(0.12), in: Capsule())
     }
 
     private func cardMenu(_ item: WeChatManager.InstanceStoragePath, index: Int) -> some View {
         Menu {
+            Button("重启此微信") {
+                runBusy(
+                    { weChatManager.relaunchInstance(bundleId: item.bundleIdentifier) },
+                    completion: { refreshAccountRows() }
+                )
+            }
+            if isInstanceRunning(item.bundleIdentifier) {
+                Button("退出此微信") {
+                    weChatManager.closeWeChatInstance(bundleId: item.bundleIdentifier)
+                    feedbackMessage = "\(item.appName)：已请求退出。"
+                }
+            }
+            Divider()
             Button("在访达中显示") {
                 openInFinder(path: item.wechatFilesPath, exists: item.wechatFilesExists)
             }
@@ -551,13 +559,6 @@ struct DashboardView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(item.wechatFilesPath, forType: .string)
                 feedbackMessage = "路径已复制。"
-            }
-            if isInstanceRunning(item.bundleIdentifier) {
-                Divider()
-                Button("退出此微信") {
-                    weChatManager.closeWeChatInstance(bundleId: item.bundleIdentifier)
-                    feedbackMessage = "\(item.appName)：已请求退出。"
-                }
             }
             if !(item.expectedWxid ?? "").isEmpty {
                 Divider()
@@ -578,9 +579,21 @@ struct DashboardView: View {
         .fixedSize()
     }
 
-    private func accountSentence(_ item: WeChatManager.InstanceStoragePath, state: AccountCardState) -> String {
+    private func accountSentence(_ item: WeChatManager.InstanceStoragePath, state: AccountCardState, isRunning: Bool) -> String {
         let active = item.activeWxid ?? ""
         let expected = item.expectedWxid ?? ""
+        if item.unreadable {
+            return "WeClone 没有权限读取这个窗口的数据目录，认不了账号。点「去授权」，在完全磁盘访问权限里允许 WeClone 后回来刷新即可。"
+        }
+        if !isRunning {
+            if !expected.isEmpty {
+                return "窗口没有在运行。已记住 \(shortWxid(expected))，下次启动登录的就是这个账号。"
+            }
+            if !active.isEmpty {
+                return "窗口没有在运行。上次登录的是 \(shortWxid(active))，还没记住对应关系。"
+            }
+            return "窗口没有在运行，也没记住过对应关系。"
+        }
         switch state {
         case .consistent:
             return "这个窗口登录的就是记住的账号（\(shortWxid(active))），对应关系正常。"
@@ -589,9 +602,9 @@ struct DashboardView: View {
         case .unboundLoggedIn:
             return "这个窗口登录了 \(shortWxid(active))，还没记住对应关系。"
         case .expectedOnly:
-            return "已记住 \(shortWxid(expected))；暂时没检测到登录账号，打开微信进入主界面后会自动核对。"
+            return "已记住 \(shortWxid(expected))；正在登录或还没检测到账号，进入主界面后自动核对。"
         case .unknown:
-            return "没检测到登录账号，也没记住过对应关系。"
+            return "窗口开着但没检测到登录账号；如果停在扫码页，登录后自动更新。"
         }
     }
 
@@ -657,7 +670,7 @@ struct DashboardView: View {
     private var maintenancePage: some View {
         VStack(alignment: .leading, spacing: 20) {
             settingsGroup(title: "副本清理") {
-                settingsRow(label: "清理旧副本", subtitle: "只保留最近使用的若干个微信副本，运行中的不会被动", divider: true) {
+                settingsRow(label: "清理旧副本", divider: true) {
                     HStack(spacing: 6) {
                         Text("保留最近")
                             .foregroundColor(.secondary)
@@ -674,7 +687,7 @@ struct DashboardView: View {
                         .disabled(isBusy)
                     }
                 }
-                settingsRow(label: "重建现有副本", subtitle: "旧版创建的副本是完整拷贝；重建为写时复制克隆，可省下大部分占用（只处理未运行的）", divider: false) {
+                settingsRow(label: "重建现有副本", divider: false) {
                     Button("重建") {
                         showRecloneConfirmation = true
                     }
@@ -696,19 +709,19 @@ struct DashboardView: View {
             }
 
             settingsGroup(title: "偏好设置") {
-                settingsRow(label: "串号提醒", subtitle: "微信窗口登录的账号和记住的对不上时，发系统通知提醒", divider: true) {
+                settingsRow(label: "串号提醒", divider: true) {
                     Toggle("", isOn: $weChatManager.mismatchAlertEnabled)
                         .toggleStyle(.switch)
                         .labelsHidden()
                         .controlSize(.small)
                 }
-                settingsRow(label: "弹窗提醒更新", subtitle: "每天自动检查新版本，发现后弹窗询问；关闭后仍可在「关于」页手动检查", divider: true) {
+                settingsRow(label: "弹窗提醒更新", divider: true) {
                     Toggle("", isOn: $autoUpdate.autoUpdateEnabled)
                         .toggleStyle(.switch)
                         .labelsHidden()
                         .controlSize(.small)
                 }
-                settingsRow(label: "自动安装更新", subtitle: "发现新版本后不询问，直接下载并安装", divider: false) {
+                settingsRow(label: "自动安装更新", divider: false) {
                     Toggle("", isOn: $autoUpdate.autoInstallUpdates)
                         .toggleStyle(.switch)
                         .labelsHidden()
@@ -717,14 +730,14 @@ struct DashboardView: View {
             }
 
             settingsGroup(title: "安全操作") {
-                settingsRow(label: "重置设置", subtitle: "清空实例名称与账号记忆，不动微信数据", divider: true) {
+                settingsRow(label: "重置设置", divider: true) {
                     Button("重置", role: .destructive) {
                         showResetConfirmation = true
                     }
                     .buttonStyle(.bordered)
                     .disabled(isBusy)
                 }
-                settingsRow(label: "撤销上一步", subtitle: "撤销最近一次重置或清理（可恢复废纸篓项目）", divider: true) {
+                settingsRow(label: "撤销上一步", divider: true) {
                     Button("撤销") {
                         feedbackMessage = weChatManager.undoLastOperation()
                         refreshAccountRows()
@@ -732,7 +745,7 @@ struct DashboardView: View {
                     .buttonStyle(.bordered)
                     .disabled(!weChatManager.canUndoLastAction || isBusy)
                 }
-                settingsRow(label: "复制诊断", subtitle: "导出运行状态与目录信息，便于排查问题", divider: false) {
+                settingsRow(label: "复制诊断", divider: false) {
                     Button("复制") {
                         runBusy { weChatManager.copyDiagnosticsToPasteboard() }
                     }
@@ -906,10 +919,10 @@ struct DashboardView: View {
         return formatter.string(fromByteCount: bytes)
     }
 
-    /// 路径行尾部的数据体积胶囊
+    /// 路径行尾部的数据体积胶囊（读不进去时不显示，避免误导成 0 KB）
     @ViewBuilder
     private func storageSizeLabel(_ item: WeChatManager.InstanceStoragePath) -> some View {
-        if item.wechatFilesExists {
+        if item.wechatFilesExists && !item.unreadable {
             if let size = storageSizes[item.bundleIdentifier] {
                 Text("数据 \(formattedSize(size))")
                     .font(.system(size: 10, weight: .medium))
@@ -954,7 +967,8 @@ struct DashboardView: View {
             activeWxid: old.activeWxid,
             wxidCount: old.wxidCount,
             expectedWxid: expectedWxid,
-            bindingStatus: status
+            bindingStatus: status,
+            unreadable: old.unreadable
         )
     }
 
@@ -980,23 +994,15 @@ struct DashboardView: View {
         }
     }
 
-    /// 设置行：左侧标题（可选副标题），右侧控件，行底细分隔线
+    /// 设置行：左侧标题，右侧控件，行底细分隔线
     private func settingsRow<Control: View>(
         label: String,
-        subtitle: String? = nil,
         divider: Bool,
         @ViewBuilder control: () -> Control
     ) -> some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.system(size: 13))
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-            }
+            Text(label)
+                .font(.system(size: 13))
             Spacer(minLength: 12)
             control()
         }

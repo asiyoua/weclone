@@ -62,16 +62,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.contentMinSize = NSSize(width: 720, height: 520)
         window.setContentSize(NSSize(width: 820, height: 600))
         // macOS 26 的 window.center() 会把窗放到屏幕外且缩水，必须显式 setFrameOrigin
-        if let screen = NSScreen.main {
-            let visible = screen.visibleFrame
-            let x = visible.midX - 820 / 2
-            let y = visible.midY - 600 / 2
-            window.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        centerDashboardWindow(on: window)
         dashboardWindow = window
     }
 
+    /// 窗口小于内容最小尺寸说明被系统缩水，重新钉回标准尺寸并居中
+    private func centerDashboardWindow(on window: NSWindow) {
+        let size = NSSize(width: 820, height: 600)
+        guard let screen = NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let x = visible.midX - size.width / 2
+        let y = visible.midY - size.height / 2
+        window.setContentSize(size)
+        window.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
     func showDashboardWindow() {
+        if let window = dashboardWindow, window.frame.width < window.contentMinSize.width {
+            centerDashboardWindow(on: window)
+        }
         dashboardWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -134,6 +143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(launchToItem)
 
         menu.addItem(NSMenuItem(title: "记住当前账号", action: #selector(onBindTopTwoRunning), keyEquivalent: "b"))
+        menu.addItem(NSMenuItem(title: "按账号重启（一键全开）", action: #selector(onRelaunchByBindings), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "管理面板", action: #selector(onOpenDashboard), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "全部关闭", action: #selector(onCloseAllWeChat), keyEquivalent: "k"))
         menu.addItem(NSMenuItem.separator())
@@ -165,6 +175,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func onBindTopTwoRunning() {
         _ = weChatManager.autoBindRunningInstances(limit: 2)
         updateStatusButton()
+    }
+
+    @objc func onRelaunchByBindings() {
+        // 关停再拉起全程带等待，放后台做，别把菜单栏卡住
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            _ = self.weChatManager.relaunchByBindings()
+            DispatchQueue.main.async {
+                self.updateStatusButton()
+            }
+        }
     }
 
     @objc func onCloseAllWeChat() {

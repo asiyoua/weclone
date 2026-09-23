@@ -39,6 +39,8 @@ class WeChatManager: ObservableObject {
         let wxidCount: Int
         let expectedWxid: String?
         let bindingStatus: String
+        /// 目录在但读不进去：macOS 会保护其他应用的容器数据，需要完全磁盘访问授权
+        let unreadable: Bool
     }
 
     struct CloneCleanupResult {
@@ -175,6 +177,66 @@ class WeChatManager: ObservableObject {
             .forEach { $0.terminate() }
     }
 
+    /// 重启单个实例：运行中先退出，进程结束后再按原样开回来
+    func relaunchInstance(bundleId: String) -> String {
+        let name = getInstanceDisplayName(for: bundleId)
+        let runningApps = NSWorkspace.shared.runningApplications.filter {
+            isMainWeChatApp($0) && $0.bundleIdentifier == bundleId
+        }
+        for app in runningApps {
+            app.terminate()
+        }
+        if !runningApps.isEmpty {
+            let deadline = Date().addingTimeInterval(6)
+            while Date() < deadline,
+                  NSWorkspace.shared.runningApplications.contains(where: {
+                      isMainWeChatApp($0) && $0.bundleIdentifier == bundleId
+                  }) {
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+        }
+        if launchInstance(for: bundleId) {
+            return "\(name)：已发起重启。"
+        }
+        return "\(name)：重启失败，没有找到可启动的副本。"
+    }
+
+    /// 删除一个副本窗口：副本应用与数据容器一起进废纸篓，并清掉名称与账号记忆
+    func deleteInstance(bundleId: String) -> String {
+        guard bundleId != "com.tencent.xinWeChat" else {
+            return "微信主程序不能在这里删除。"
+        }
+        if getRunningMainWeChatBundleIds().contains(bundleId) {
+            return "这个微信窗口还在运行，先退出再删除。"
+        }
+
+        let name = getInstanceDisplayName(for: bundleId)
+        var trashedItems: [TrashedItem] = []
+        if let index = cloneIndex(fromBundleId: bundleId) {
+            let clonePath = "\(cloneRootDirectory)/WeChat\(index).app"
+            if let trashed = moveToTrash(path: clonePath) {
+                trashedItems.append(trashed)
+            }
+        }
+        let containerPath = "\(NSHomeDirectory())/Library/Containers/\(bundleId)"
+        if let trashed = moveToTrash(path: containerPath) {
+            trashedItems.append(trashed)
+        }
+
+        var aliases = loadAliases()
+        aliases.removeValue(forKey: bundleId)
+        saveAliases(aliases)
+        var expected = loadExpectedWxids()
+        expected.removeValue(forKey: bundleId)
+        saveExpectedWxids(expected)
+
+        guard !trashedItems.isEmpty else {
+            return "没有找到这个窗口的副本内容，可能已经删过了。"
+        }
+        setUndoOperation(.restoreTrashedItems(items: trashedItems, summary: "已删除窗口（可撤销）"))
+        return "已删除 \(name)：副本与数据目录进了废纸篓，可在维护页撤销。"
+    }
+
     /// 副本是否落后于原版微信（下次启动这个副本时会自动重建）
     func cloneNeedsSync(bundleId: String) -> Bool {
         guard bundleId != "com.tencent.xinWeChat",
@@ -227,7 +289,27 @@ class WeChatManager: ObservableObject {
         let bundleId = "com.tencent.xinWeChat.multi\(cloneIndex)"
 
         if FileManager.default.fileExists(atPath: clonedPath) {
-            if needsUpdate(clonePath: clonedPath, sourcePath: sourcePath) {
+            // 副本身份不对（改名失败或来历不明的手工拷贝）会顶替原版身份、混入窗口列表，直接重建
+            let existingBundleId = readBundleIdentifier(fromAppPath: clonedPath)
+            if existingBundleId != bundleId {
+                do {
+                    try FileManager.default.removeItem(atPath: clonedPath)
+                } catch {
+                    appendLaunchLog(
+                        bundleIdentifier: bundleId,
+                        appPath: clonedPath,
+                        status: "失败",
+                        detail: "副本身份不对（标成了 \(existingBundleId ?? "未知")）且无法删除，请手动处理 \(clonedPath)"
+                    )
+                    return nil
+                }
+                appendLaunchLog(
+                    bundleIdentifier: bundleId,
+                    appPath: clonedPath,
+                    status: "重建中",
+                    detail: "副本身份不对（标成了 \(existingBundleId ?? "未知")），正在重建"
+                )
+            } else if needsUpdate(clonePath: clonedPath, sourcePath: sourcePath) {
                 do {
                     try FileManager.default.removeItem(atPath: clonedPath)
                     appendLaunchLog(
@@ -260,12 +342,15 @@ class WeChatManager: ObservableObject {
             return nil
         }
 
-        guard updateBundleMetadata(appPath: clonedPath, bundleId: bundleId, displayName: "WeChat\(cloneIndex)") else {
+        guard updateBundleMetadata(appPath: clonedPath, bundleId: bundleId, displayName: "WeChat\(cloneIndex)"),
+              readBundleIdentifier(fromAppPath: clonedPath) == bundleId else {
+            // 改名没写成会留下一个顶着原版身份的假副本，必须清掉
+            try? FileManager.default.removeItem(atPath: clonedPath)
             appendLaunchLog(
                 bundleIdentifier: bundleId,
                 appPath: clonedPath,
                 status: "失败",
-                detail: "更新克隆应用元数据失败"
+                detail: "更新克隆应用元数据失败，已清理残留"
             )
             return nil
         }
@@ -388,7 +473,8 @@ class WeChatManager: ObservableObject {
                     activeWxid: wxidInfo.activeWxid,
                     wxidCount: wxidInfo.wxidCount,
                     expectedWxid: expectedWxid,
-                    bindingStatus: computeBindingStatus(activeWxid: wxidInfo.activeWxid, expectedWxid: expectedWxid)
+                    bindingStatus: computeBindingStatus(activeWxid: wxidInfo.activeWxid, expectedWxid: expectedWxid),
+                    unreadable: wxidInfo.unreadable
                 )
             )
         }
@@ -473,7 +559,8 @@ class WeChatManager: ObservableObject {
     }
 
     func getRunningInstanceSummaries() -> [RunningInstanceSummary] {
-        let bundleIds = sortedBundleIds(getRunningMainWeChatBundleIds())
+        // 同一 bundleId 跑出多个进程时只算一个窗口，避免重复卡片
+        let bundleIds = sortedBundleIds(Array(Set(getRunningMainWeChatBundleIds())))
         return bundleIds.map { bundleId in
             let wechatFilesPath = "\(NSHomeDirectory())/Library/Containers/\(bundleId)/Data/Documents/xwechat_files"
             let wxidInfo = detectWxidInfo(in: wechatFilesPath)
@@ -741,13 +828,17 @@ class WeChatManager: ObservableObject {
         var bundleIds: [String] = ["com.tencent.xinWeChat"]
 
         for clonePath in listCloneAppPaths() {
-            if let bundleId = readBundleIdentifier(fromAppPath: clonePath) {
+            // 只认身份正常的副本；改名失败的坏副本不作为窗口展示
+            if let bundleId = readBundleIdentifier(fromAppPath: clonePath),
+               bundleId == "com.tencent.xinWeChat" || cloneIndex(fromBundleId: bundleId) != nil {
                 bundleIds.append(bundleId)
             }
         }
 
         for app in NSWorkspace.shared.runningApplications {
-            if let bundleId = app.bundleIdentifier, bundleId.hasPrefix("com.tencent.xinWeChat") {
+            // 只认主程序和副本；WeChatAppEx 等子进程的 id 也带同款前缀，混进来会多出假窗口
+            if let bundleId = app.bundleIdentifier,
+               bundleId == "com.tencent.xinWeChat" || cloneIndex(fromBundleId: bundleId) != nil {
                 bundleIds.append(bundleId)
             }
         }
@@ -948,30 +1039,69 @@ class WeChatManager: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    private func detectWxidInfo(in wechatFilesPath: String) -> (activeWxid: String?, wxidCount: Int) {
+    private func detectWxidInfo(in wechatFilesPath: String) -> (activeWxid: String?, wxidCount: Int, unreadable: Bool) {
         guard let items = try? FileManager.default.contentsOfDirectory(
             atPath: wechatFilesPath
         ) else {
-            return (nil, 0)
+            // 目录在但读不进去（别的应用的容器数据受系统保护），和「目录不存在」要区分开
+            if FileManager.default.fileExists(atPath: wechatFilesPath) {
+                return (nil, 0, true)
+            }
+            return (nil, 0, false)
         }
 
         let wxids = items.filter { $0.hasPrefix("wxid_") }
         guard !wxids.isEmpty else {
-            return (nil, 0)
+            return (nil, 0, false)
         }
 
         var latestWxid: String?
         var latestDate: Date = .distantPast
         for wxid in wxids {
-            let path = "\(wechatFilesPath)/\(wxid)"
-            let date = modificationDate(ofPath: path)
+            let date = accountActivityDate(at: "\(wechatFilesPath)/\(wxid)")
             if date > latestDate {
                 latestDate = date
                 latestWxid = wxid
             }
         }
 
-        return (latestWxid, wxids.count)
+        return (latestWxid, wxids.count, false)
+    }
+
+    /// 账号最近活跃时间。微信登录后的写入大多发生在 db_storage/config 深层文件，
+    /// 账号目录自身的 mtime 基本不动，只看它会把活跃账号判旧；
+    /// 对这两个轻量目录做有上限的抽样，取最新文件时间。
+    private func accountActivityDate(at accountPath: String) -> Date {
+        var latest = modificationDate(ofPath: accountPath)
+        let fileManager = FileManager.default
+        for section in ["db_storage", "config"] {
+            let sectionPath = "\(accountPath)/\(section)"
+            guard let entries = try? fileManager.contentsOfDirectory(atPath: sectionPath) else {
+                continue
+            }
+            for entry in entries.prefix(40) {
+                let entryPath = "\(sectionPath)/\(entry)"
+                var isDir: ObjCBool = false
+                fileManager.fileExists(atPath: entryPath, isDirectory: &isDir)
+                if isDir.boolValue {
+                    guard let files = try? fileManager.contentsOfDirectory(atPath: entryPath) else {
+                        continue
+                    }
+                    for file in files.prefix(40) {
+                        let date = modificationDate(ofPath: "\(entryPath)/\(file)")
+                        if date > latest {
+                            latest = date
+                        }
+                    }
+                } else {
+                    let date = modificationDate(ofPath: entryPath)
+                    if date > latest {
+                        latest = date
+                    }
+                }
+            }
+        }
+        return latest
     }
 
     private func appendLaunchLog(
