@@ -50,6 +50,8 @@ struct DashboardView: View {
     @State private var lastRunningBundleIds: Set<String> = []
     @State private var deleteCandidate: WeChatManager.InstanceStoragePath?
     @State private var showDeleteConfirmation: Bool = false
+    @State private var showAuthGuide: Bool = false
+    @State private var authGuideShownThisLaunch: Bool = false
     /// 各实例聊天数据目录的磁盘占用（字节），会话内缓存
     @State private var storageSizes: [String: Int64] = [:]
     @State private var sizeScansInProgress: Set<String> = []
@@ -86,10 +88,22 @@ struct DashboardView: View {
             lastRunningBundleIds = ids
             refreshAccountRows()
         }
+        // 从系统设置授权完切回来时自动重扫，识别状态当场恢复
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            if selectedPage == .accounts {
+                refreshAccountRows()
+            }
+        }
         .sheet(isPresented: $showOnboarding, onDismiss: {
             onboardingDismissed = true
         }) {
             OnboardingView(dismiss: { showOnboarding = false })
+        }
+        .sheet(isPresented: $showAuthGuide, onDismiss: {
+            // 引导里重新授权完，关闭时立刻重扫，识别状态当场恢复
+            refreshAccountRows()
+        }) {
+            AuthorizationGuideView(dismiss: { showAuthGuide = false })
         }
         .confirmationDialog(
             "重置设置",
@@ -471,13 +485,11 @@ struct DashboardView: View {
                 Spacer(minLength: 0)
                 if item.unreadable {
                     Button("去授权") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-                            NSWorkspace.shared.open(url)
-                        }
+                        showAuthGuide = true
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .help("打开系统设置的「完全磁盘访问权限」，把 WeClone 打开后回来点「刷新」")
+                    .help("微信更新后需重新授权，点开按引导操作")
                 }
                 if isRunning, state == .mismatch, let active = item.activeWxid {
                     Button("更新绑定") {
@@ -583,7 +595,7 @@ struct DashboardView: View {
         let active = item.activeWxid ?? ""
         let expected = item.expectedWxid ?? ""
         if item.unreadable {
-            return "WeClone 没有权限读取这个窗口的数据目录，认不了账号。点「去授权」，在完全磁盘访问权限里允许 WeClone 后回来刷新即可。"
+            return "没有权限读取这个窗口的数据目录（微信更新后常见）。点「去授权」，按引导重新授权即可。"
         }
         if !isRunning {
             if !expected.isEmpty {
@@ -890,6 +902,15 @@ struct DashboardView: View {
                 }
                 isLoadingAccounts = false
                 scanStorageSizes(for: rows)
+                // 有读不了的容器：微信或 WeClone 更新后授权失效了，弹一次授权引导
+                if rows.contains(where: { $0.unreadable }), !authGuideShownThisLaunch, !showOnboarding {
+                    authGuideShownThisLaunch = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        if accountRows.contains(where: { $0.unreadable }) {
+                            showAuthGuide = true
+                        }
+                    }
+                }
             }
         }
     }
