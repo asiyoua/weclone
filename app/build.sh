@@ -75,9 +75,15 @@ elif [ -f "WeClone/Assets.xcassets/AppIcon.appiconset/icon_512x512.png" ]; then
 fi
 
 # 移除隔离属性并签名
+# 优先用固定自签证书「WeClone Dev」：签名身份跨版本稳定，用户的系统授权不会因换包失效
 echo "🔐 正在签名应用..."
 xattr -cr "$APP_NAME" 2>/dev/null || true
-codesign --force --deep --sign - "$APP_NAME" 2>/dev/null || true
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "WeClone Dev"; then
+    codesign --force --deep --sign "WeClone Dev" "$APP_NAME" 2>/dev/null || true
+else
+    echo "⚠️  未找到「WeClone Dev」证书，改用临时签名（每次换包都需要用户重新授权）"
+    codesign --force --deep --sign - "$APP_NAME" 2>/dev/null || true
+fi
 
 echo -e "${GREEN}✅ 构建成功!${NC}"
 echo ""
