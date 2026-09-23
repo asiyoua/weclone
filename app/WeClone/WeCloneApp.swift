@@ -154,6 +154,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
 
         menu.addItem(NSMenuItem(title: "撤销上一步", action: #selector(onUndoLastAction), keyEquivalent: "z"))
+        menu.items.last?.isEnabled = weChatManager.canUndoLastAction
         menu.addItem(NSMenuItem(title: "复制诊断信息", action: #selector(onCopyDiagnostics), keyEquivalent: "c"))
         menu.addItem(NSMenuItem(title: "重置设置", action: #selector(onResetMappings), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())

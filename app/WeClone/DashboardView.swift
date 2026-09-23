@@ -602,8 +602,9 @@ struct DashboardView: View {
         if item.unreadable {
             return "没有权限读取数据目录（微信更新后常见），点「去授权」按引导处理。"
         }
-        if isRunning, state == .mismatch {
-            return "记住的是 \(shortWxid(item.expectedWxid))，现在登录的是 \(shortWxid(item.activeWxid))。"
+        if state == .mismatch {
+            let verb = isRunning ? "现在登录的是" : "上次登录的是"
+            return "记住的是 \(shortWxid(item.expectedWxid))，\(verb) \(shortWxid(item.activeWxid))。"
         }
         return nil
     }

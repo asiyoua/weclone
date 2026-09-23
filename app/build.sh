@@ -79,10 +79,16 @@ fi
 echo "🔐 正在签名应用..."
 xattr -cr "$APP_NAME" 2>/dev/null || true
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "WeClone Dev"; then
-    codesign --force --deep --sign "WeClone Dev" "$APP_NAME" 2>/dev/null || true
+    if ! codesign --force --deep --sign "WeClone Dev" "$APP_NAME"; then
+        echo "❌ 错误: 签名失败，不产出不可用的应用包"
+        exit 1
+    fi
 else
     echo "⚠️  未找到「WeClone Dev」证书，改用临时签名（每次换包都需要用户重新授权）"
-    codesign --force --deep --sign - "$APP_NAME" 2>/dev/null || true
+    if ! codesign --force --deep --sign - "$APP_NAME"; then
+        echo "❌ 错误: 签名失败，不产出不可用的应用包"
+        exit 1
+    fi
 fi
 
 echo -e "${GREEN}✅ 构建成功!${NC}"
