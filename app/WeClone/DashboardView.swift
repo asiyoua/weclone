@@ -432,6 +432,8 @@ struct DashboardView: View {
         let pill = item.unreadable
             ? (text: "无权限读取", color: Color.orange)
             : displayPill(state, isRunning: isRunning)
+        let warningText = accountWarning(item, state: state, isRunning: isRunning)
+        let hasAction = item.unreadable || (isRunning && (state == .mismatch || state == .unboundLoggedIn))
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle()
@@ -478,34 +480,38 @@ struct DashboardView: View {
                 cardMenu(item, index: index)
             }
 
-            HStack(spacing: 10) {
-                Text(accountSentence(item, state: state, isRunning: isRunning))
-                    .font(.system(size: 11))
-                    .foregroundColor(state == .mismatch ? .red : .secondary)
-                Spacer(minLength: 0)
-                if item.unreadable {
-                    Button("去授权") {
-                        showAuthGuide = true
+            if warningText != nil || hasAction {
+                HStack(spacing: 10) {
+                    if let warningText {
+                        Text(warningText)
+                            .font(.system(size: 11))
+                            .foregroundColor(state == .mismatch ? .red : .secondary)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .help("微信更新后需重新授权，点开按引导操作")
-                }
-                if isRunning, state == .mismatch, let active = item.activeWxid {
-                    Button("更新绑定") {
-                        bindCard(item, index: index, wxid: active)
+                    Spacer(minLength: 0)
+                    if item.unreadable {
+                        Button("去授权") {
+                            showAuthGuide = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .help("微信更新后需重新授权，点开按引导操作")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(isBusy)
-                }
-                if isRunning, state == .unboundLoggedIn, let active = item.activeWxid {
-                    Button("记住当前账号") {
-                        bindCard(item, index: index, wxid: active)
+                    if isRunning, state == .mismatch, let active = item.activeWxid {
+                        Button("更新绑定") {
+                            bindCard(item, index: index, wxid: active)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(isBusy)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(isBusy)
+                    if isRunning, state == .unboundLoggedIn, let active = item.activeWxid {
+                        Button("记住当前账号") {
+                            bindCard(item, index: index, wxid: active)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(isBusy)
+                    }
                 }
             }
 
@@ -591,33 +597,15 @@ struct DashboardView: View {
         .fixedSize()
     }
 
-    private func accountSentence(_ item: WeChatManager.InstanceStoragePath, state: AccountCardState, isRunning: Bool) -> String {
-        let active = item.activeWxid ?? ""
-        let expected = item.expectedWxid ?? ""
+    /// 卡片说明行：只在真有事时出现（账号对不上、读不了数据），正常状态不写字
+    private func accountWarning(_ item: WeChatManager.InstanceStoragePath, state: AccountCardState, isRunning: Bool) -> String? {
         if item.unreadable {
-            return "没有权限读取这个窗口的数据目录（微信更新后常见）。点「去授权」，按引导重新授权即可。"
+            return "没有权限读取数据目录（微信更新后常见），点「去授权」按引导处理。"
         }
-        if !isRunning {
-            if !expected.isEmpty {
-                return "窗口没有在运行。已记住 \(shortWxid(expected))，下次启动登录的就是这个账号。"
-            }
-            if !active.isEmpty {
-                return "窗口没有在运行。上次登录的是 \(shortWxid(active))，还没记住对应关系。"
-            }
-            return "窗口没有在运行，也没记住过对应关系。"
+        if isRunning, state == .mismatch {
+            return "记住的是 \(shortWxid(item.expectedWxid))，现在登录的是 \(shortWxid(item.activeWxid))。"
         }
-        switch state {
-        case .consistent:
-            return "这个窗口登录的就是记住的账号（\(shortWxid(active))），对应关系正常。"
-        case .mismatch:
-            return "记住的是 \(shortWxid(expected))，这个窗口现在登录的是 \(shortWxid(active))。"
-        case .unboundLoggedIn:
-            return "这个窗口登录了 \(shortWxid(active))，还没记住对应关系。"
-        case .expectedOnly:
-            return "已记住 \(shortWxid(expected))；正在登录或还没检测到账号，进入主界面后自动核对。"
-        case .unknown:
-            return "窗口开着但没检测到登录账号；如果停在扫码页，登录后自动更新。"
-        }
+        return nil
     }
 
     private func isInstanceRunning(_ bundleId: String) -> Bool {
